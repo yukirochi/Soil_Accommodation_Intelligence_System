@@ -10,7 +10,6 @@ cleaned_data AS (
         N::FLOAT AS N,
         P::FLOAT AS P,
         K::FLOAT AS K,
-        output::INT AS output
     FROM 
         raw_data
 )
@@ -23,4 +22,3 @@ WHERE
 N IS NOT NULL AND
 P IS NOT NULL AND
 K IS NOT NULL AND
-output IS NOT NULL
