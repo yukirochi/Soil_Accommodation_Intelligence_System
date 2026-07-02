@@ -6,6 +6,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import root_mean_squared_error, r2_score
 import joblib
 import os
+import numpy as np
 
 class soily:
     
@@ -53,6 +54,38 @@ class soily:
     
     def train(self,df):
         
+            # --- df value verification ---
+        if df is None or not isinstance(df, pd.DataFrame):
+            raise TypeError("train() expects a pandas DataFrame")
+
+        if df.empty:
+            raise ValueError("train() received an empty DataFrame")
+
+        if 'future_moisture' not in df.columns:
+            raise ValueError("df is missing required target column 'future_moisture'")
+
+        if df.isnull().values.any():
+            null_cols = df.columns[df.isnull().any()].tolist()
+            raise ValueError(f"df contains NaN values in columns: {null_cols}")
+
+        non_numeric = df.select_dtypes(exclude=['number']).columns.tolist()
+        if non_numeric:
+            raise ValueError(f"df contains non-numeric columns: {non_numeric}")
+
+        if np.isinf(df.select_dtypes(include=['number'])).values.any():
+            raise ValueError("df contains infinite values")
+
+        expected_features = getattr(self.scaler, 'feature_names_in_', None)
+        if expected_features is not None:
+            incoming_features = df.drop(columns='future_moisture').columns
+            missing = set(expected_features) - set(incoming_features)
+            extra = set(incoming_features) - set(expected_features)
+            if missing:
+                raise ValueError(f"df is missing expected feature columns: {missing}")
+            if extra:
+                raise ValueError(f"df has unexpected extra columns: {extra}")
+        # --- end verification ---
+        
         x = df.drop(columns='future_moisture')
         y = df['future_moisture']
         
@@ -63,6 +96,8 @@ class soily:
         print("partial_fit done. Saving updated model...")
         
         self.save_model()
+        
+        return True
         
         
     def save_model(self):
