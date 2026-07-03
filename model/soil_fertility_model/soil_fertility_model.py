@@ -6,9 +6,12 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 
 class ferti:
-    def __init__(self, save_path='ferti_model.pkl', data_path='soil_fertilization.csv'):
-        self.save_path = save_path
-        self.data_path = data_path
+
+    _MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
+
+    def __init__(self, save_path=None, data_path=None):
+        self.save_path = save_path or os.path.join(self._MODEL_DIR, 'ferti_model.pkl')
+        self.data_path = data_path or os.path.join(self._MODEL_DIR, 'soil_fertilization.csv')
         self.scaler = StandardScaler()
         self.model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
         self._initialize_model()

@@ -17,7 +17,7 @@ class Retraining:
         query = """SELECT * FROM soil_moisture WHERE future_moisture IS NOT NULL"""
 
         df = pd.read_sql_query(query, conn)
-        conn.close()                         # fix: removed conn.commit() (read-only query), closed properly
+        conn.close()                        
 
         if df.empty:
             print("Retraining skipped: no completed rows in temporary DB yet.")

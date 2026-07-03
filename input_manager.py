@@ -1,12 +1,19 @@
 import pandas as pd
 import sqlite3
 import numpy as np
+from evaluation import Evaluation
 
 class InputManager:
     
-    def __init__(self, db_path='database/permanent.db', temp_db_path='database/temporary.db'):
+    def __init__(self,
+                 db_path='database/permanent.db',
+                 temp_db_path='database/temporary.db',
+                 predictions_db_path='database/predictions.db'):
         self.db_path = db_path
         self.temp_db_path = temp_db_path
+        self.predictions_db_path = predictions_db_path
+        self.evaluation = Evaluation()
+
             
     def get_prediction(self, name, df):
         
@@ -15,14 +22,20 @@ class InputManager:
         
         if name == 'soil_moisture':
             from model.soil_moisture_model.soil_moisture_model import soily
+            actual_moisture = float(df['soil_moisture'].iloc[-1])  # capture before _clean_data
             df = self._clean_data(name, df)
             model = soily()
-            return model.predict(df)
+            result = model.predict(df)
+            evaluated = self.evaluation.evaluate_result(name, result)
+            self._store_moisture_prediction(predicted=evaluated, actual_moisture=actual_moisture)
+            return evaluated
         elif name == 'soil_fertility':
             from model.soil_fertility_model.soil_fertility_model import ferti
             df = self._clean_data(name, df)
             model = ferti()
-            return model.predict(df)
+            result = model.predict(df)
+            evaluated = self.evaluation.evaluate_result(name, result)
+            return evaluated
         else:
             raise ValueError(f"Model '{name}' not recognized.")
     
@@ -88,7 +101,7 @@ class InputManager:
             return input_data
             
         
-        elif name == 'soil_fertilization':
+        elif name == 'soil_fertility':
 
             # input_format: ['N','P','K','pH','EC','OC','S','Zn','Fe','Cu','Mn','B']
             FEATURE_COLS = ['N', 'P', 'K', 'pH', 'EC', 'OC', 'S', 'Zn', 'Fe', 'Cu', 'Mn', 'B']
@@ -168,4 +181,38 @@ class InputManager:
  
     def _store_to_temporary_db(self, latest, future_moisture_value):
         self._store_moisture_row(self.temp_db_path, latest, future_moisture_value)
- 
+
+    # ------------------------------------------------------------------
+    # Prediction logging — writes to predictions.db
+    # ------------------------------------------------------------------
+
+    def _store_moisture_prediction(self, predicted, actual_moisture=None):
+        """
+        Insert this cycle's predicted moisture, and backfill the PREVIOUS
+        cycle's actual_moisture + absolute_error using the current sensor
+        reading (same rolling-window pattern as future_moisture backfill).
+        """
+        conn = sqlite3.connect(self.predictions_db_path)
+
+        if actual_moisture is not None:
+            # Backfill the most recent row that still has no actual value
+            conn.execute("""
+                UPDATE soil_moisture_predictions
+                SET    actual_moisture = ?,
+                       absolute_error  = ABS(predicted_moisture - ?)
+                WHERE  id = (
+                    SELECT id FROM soil_moisture_predictions
+                    WHERE  actual_moisture IS NULL
+                    ORDER  BY id DESC
+                    LIMIT  1
+                )
+            """, (float(actual_moisture), float(actual_moisture)))
+
+        # Insert this cycle's prediction (actual_moisture filled next cycle)
+        conn.execute("""
+            INSERT INTO soil_moisture_predictions (predicted_moisture)
+            VALUES (?)
+        """, (float(predicted),))
+
+        conn.commit()
+        conn.close()

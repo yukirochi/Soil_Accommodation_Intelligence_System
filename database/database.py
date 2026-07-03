@@ -70,4 +70,36 @@ temp_cur.execute('''
 temp_conn.commit()
 temp_conn.close()
 
-print("Databases initialised: permanent.db (seeded) + temporary.db (empty)")
+# ---------------------------------------------------------------------------
+# Predictions DB — stores every model prediction alongside the actual value
+# observed on the next cycle.  Used to compute accuracy / MAE over time.
+#
+# soil_moisture_predictions:
+#   predicted_moisture  — what the model returned for this cycle
+#   actual_moisture     — the real soil_moisture reading from the NEXT cycle
+#                         (NULL until that reading arrives, then backfilled)
+#   absolute_error      — ABS(predicted - actual), computed on backfill
+#
+# soil_fertility_predictions:
+#   predicted_fertility — 0 or 1 returned by the model
+#   actual_fertility    — the ground-truth label (filled externally / manually)
+#   correct             — 1 if prediction matched actual, else 0
+# ---------------------------------------------------------------------------
+pred_conn = sqlite3.connect('predictions.db')
+pred_cur  = pred_conn.cursor()
+
+pred_cur.execute('DROP TABLE IF EXISTS soil_moisture_predictions')
+pred_cur.execute('''
+    CREATE TABLE soil_moisture_predictions (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp          DATETIME DEFAULT CURRENT_TIMESTAMP,
+        predicted_moisture REAL     NOT NULL,
+        actual_moisture    REAL,
+        absolute_error     REAL
+    )
+''')
+
+pred_conn.commit()
+pred_conn.close()
+
+print("Databases initialised: permanent.db (seeded) + temporary.db (empty) + predictions.db (empty)")

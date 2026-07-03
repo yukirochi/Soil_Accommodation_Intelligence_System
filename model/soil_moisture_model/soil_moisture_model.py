@@ -9,11 +9,18 @@ import os
 import numpy as np
 
 class soily:
-    
-    def __init__(self,data_path='soil_moist.csv',save_path='soily.pkl'):
-        
-        self.save_path = save_path
-        
+
+    # Absolute directory of this file — paths are always resolved here
+    # regardless of the caller's working directory.
+    _MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
+
+    def __init__(self,
+                 data_path=None,
+                 save_path=None):
+
+        self.save_path = save_path or os.path.join(self._MODEL_DIR, 'soily.pkl')
+        _data_path     = data_path or os.path.join(self._MODEL_DIR, 'soil_moist.csv')
+
         if os.path.exists(self.save_path):
             self.load_model()
         else: 
@@ -28,7 +35,7 @@ class soily:
                 random_state=42
             )
             
-            self._initalize_base_model(data_path)
+            self._initalize_base_model(_data_path)
     
     def _initalize_base_model(self, data_path):
         

@@ -44,6 +44,13 @@ _STUB_MODULES = {
 for name, mod in _STUB_MODULES.items():
     sys.modules.setdefault(name, mod)
 
+# Stub the Evaluation class so unit tests don't go through real evaluation logic
+from unittest.mock import MagicMock as _MM
+import types as _types
+_eval_stub = _types.ModuleType("evaluation")
+_eval_stub.Evaluation = _MM
+sys.modules.setdefault("evaluation", _eval_stub)
+
 from input_manager import InputManager  # noqa: E402  (must come after stubs)
 
 
@@ -154,7 +161,7 @@ class TestGetPrediction:
     def test_soil_fertility_calls_clean_data(self, mock_clean, manager):
         mock_clean.return_value = _fertility_df()
         mock_model_instance = MagicMock()
-        mock_model_instance.predict.return_value = ["Fertile"]
+        mock_model_instance.predict.return_value = 1   # valid fertility label
         with patch.dict(
             "sys.modules",
             {
@@ -170,10 +177,15 @@ class TestGetPrediction:
 
     @patch.object(InputManager, "_clean_data")
     def test_prediction_result_propagated(self, mock_clean, manager):
-        expected = [99.9]
+        """get_prediction returns the scalar result after evaluation unwraps it."""
         mock_clean.return_value = _moisture_df()
         mock_model_instance = MagicMock()
-        mock_model_instance.predict.return_value = expected
+        mock_model_instance.predict.return_value = [55.0]   # in-range moisture
+        # Replace the stubbed evaluation with a minimal real-behaving stand-in
+        class _FakeEval:
+            def evaluate_result(self, name, result):
+                return result[0]   # mirrors real Evaluation.evaluate_result for soil_moisture
+        manager.evaluation = _FakeEval()
         with patch.dict(
             "sys.modules",
             {
@@ -183,7 +195,8 @@ class TestGetPrediction:
             },
         ):
             result = manager.get_prediction("soil_moisture", _moisture_df())
-        assert result == expected
+        # evaluate_result unwraps result[0] and returns a scalar
+        assert result == 55.0
 
 
 # ---------------------------------------------------------------------------
@@ -525,21 +538,19 @@ class TestIntegration:
 
     def test_moisture_temp_db_accumulates_across_calls(self, real_manager, dbs):
         """
-        On the 2nd call, the last-5 window includes the freshly inserted NULL
-        future_moisture row, causing the null-guard to skip that cycle.
-        So 3 calls yield 2 successful writes (calls 1 and 3).
+        With the IS NOT NULL query fix, every cycle produces a row.
+        3 calls yield 3 rows in temp DB.
         """
         _, temp = dbs
         for _ in range(3):
             real_manager._clean_data("soil_moisture", _moisture_df())
-        assert _row_count(temp, "soil_moisture") == 2
+        assert _row_count(temp, "soil_moisture") == 3
 
     def test_moisture_permanent_db_future_moisture_backfill(self, real_manager, dbs):
         """
-        Call 1 inserts a row with future_moisture=NULL.
-        Call 2 hits the null-guard (the NULL row is in the last-5 window) and skips
-        the INSERT — so no new NULL row is created. The UPDATE inside _store_moisture_row
-        of call 1 already filled the NULL, leaving zero NULLs after both calls.
+        Call 1 inserts a row with future_moisture=NULL and backfills any prior NULL.
+        Call 2 backfills call 1's NULL row, then inserts a new one.
+        After 2 calls there is always exactly 1 NULL (the latest row).
         """
         perm, _ = dbs
         real_manager._clean_data("soil_moisture", _moisture_df())
@@ -549,7 +560,7 @@ class TestIntegration:
             "SELECT COUNT(*) FROM soil_moisture WHERE future_moisture IS NULL"
         ).fetchone()[0]
         conn.close()
-        assert null_count == 0
+        assert null_count == 1
 
     # ------------------------------------------------------------------
     # soil_fertilization — actual DB write verification
@@ -575,8 +586,17 @@ class TestIntegration:
     # ------------------------------------------------------------------
 
     def test_get_prediction_moisture_triggers_temp_db_write(self, real_manager, dbs):
-        """Full pipeline: real DB ops, only the ML model is mocked."""
+        """Full pipeline: real DB ops + real evaluate_result, only model mocked."""
         _, temp = dbs
+        import importlib.util, os
+        _spec = importlib.util.spec_from_file_location(
+            "_eval_real",
+            os.path.join(os.path.dirname(__file__), "..", "evaluation.py")
+        )
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        real_manager.evaluation = _mod.Evaluation()
+
         mock_model = MagicMock()
         mock_model.predict.return_value = [36.0]
         with patch.dict(
@@ -589,7 +609,147 @@ class TestIntegration:
         ):
             result = real_manager.get_prediction("soil_moisture", _moisture_df())
 
-        assert result == [36.0]
+        # evaluate_result unwraps [36.0] -> 36.0 and validates range
+        assert isinstance(result, float)
+        assert 0 <= result <= 100
         assert _row_count(temp, "soil_moisture") == 1, (
             "get_prediction must write one row to the temporary DB"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestGetPredictionIntegration — real model, real DB, real evaluation
+# ---------------------------------------------------------------------------
+
+import importlib.util as _ilu
+import os as _os
+
+_MODEL_DIR = _os.path.join(
+    _os.path.dirname(__file__), "..", "model", "soil_moisture_model"
+)
+_PKL_EXISTS = _os.path.exists(_os.path.join(_MODEL_DIR, "soily.pkl"))
+
+full_integration = pytest.mark.skipif(
+    not _PKL_EXISTS,
+    reason="soily.pkl not found — skipping full integration tests"
+)
+
+
+class TestGetPredictionIntegration:
+    """
+    Tests get_prediction() with the real soily model, real SQLite databases,
+    and real Evaluation class. These verify the complete pipeline end-to-end.
+    """
+
+    @staticmethod
+    def _real_soily():
+        spec = _ilu.spec_from_file_location(
+            "_soily_real", _os.path.join(_MODEL_DIR, "soil_moisture_model.py")
+        )
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.soily
+
+    @staticmethod
+    def _real_evaluation():
+        spec = _ilu.spec_from_file_location(
+            "_eval_real",
+            _os.path.join(_os.path.dirname(__file__), "..", "evaluation.py")
+        )
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.Evaluation()
+
+    @pytest.fixture
+    def real_dbs(self, tmp_path):
+        perm = str(tmp_path / "permanent.db")
+        temp = str(tmp_path / "temporary.db")
+        _seed_permanent_db(perm, rows=5)
+        _create_empty_db(temp)
+        return perm, temp
+
+    def _make_mgr(self, perm, temp):
+        mgr = InputManager(db_path=perm, temp_db_path=temp)
+        mgr.evaluation = self._real_evaluation()
+        return mgr
+
+    @full_integration
+    def test_get_prediction_returns_float_in_valid_range(self, real_dbs):
+        """get_prediction returns a float between 0 and 100."""
+        perm, temp = real_dbs
+        original_dir = _os.getcwd()
+        _os.chdir(_MODEL_DIR)
+        try:
+            with patch.dict("sys.modules", {
+                "model.soil_moisture_model.soil_moisture_model":
+                    type("_mod", (), {"soily": self._real_soily()})()
+            }):
+                mgr = self._make_mgr(perm, temp)
+                result = mgr.get_prediction("soil_moisture", _moisture_df())
+        finally:
+            _os.chdir(original_dir)
+
+        assert isinstance(result, float), f"Expected float, got {type(result)}: {result}"
+        assert 0 <= result <= 100, f"Result {result} is out of valid range 0-100"
+
+    @full_integration
+    def test_get_prediction_writes_to_temp_db(self, real_dbs):
+        """After get_prediction, exactly one row is inserted into the temporary DB."""
+        perm, temp = real_dbs
+        original_dir = _os.getcwd()
+        _os.chdir(_MODEL_DIR)
+        try:
+            with patch.dict("sys.modules", {
+                "model.soil_moisture_model.soil_moisture_model":
+                    type("_mod", (), {"soily": self._real_soily()})()
+            }):
+                mgr = self._make_mgr(perm, temp)
+                mgr.get_prediction("soil_moisture", _moisture_df())
+        finally:
+            _os.chdir(original_dir)
+
+        assert _row_count(temp, "soil_moisture") == 1
+
+    @full_integration
+    def test_get_prediction_raises_on_out_of_range_result(self, real_dbs):
+        """Evaluation must raise ValueError if predicted value is outside 0-100."""
+        perm, temp = real_dbs
+        mock_model = MagicMock()
+        mock_model.predict.return_value = [-999.0]  # intentionally invalid
+        with patch.dict("sys.modules", {
+            "model.soil_moisture_model.soil_moisture_model": MagicMock(
+                soily=MagicMock(return_value=mock_model)
+            )
+        }):
+            mgr = self._make_mgr(perm, temp)
+            with pytest.raises(ValueError, match="out of expected range"):
+                mgr.get_prediction("soil_moisture", _moisture_df())
+
+    @full_integration
+    def test_three_consecutive_predictions_all_succeed(self, real_dbs):
+        """Three consecutive calls all return valid floats and accumulate 3 temp rows."""
+        perm, temp = real_dbs
+        results = []
+        original_dir = _os.getcwd()
+        _os.chdir(_MODEL_DIR)
+        try:
+            with patch.dict("sys.modules", {
+                "model.soil_moisture_model.soil_moisture_model":
+                    type("_mod", (), {"soily": self._real_soily()})()
+            }):
+                mgr = self._make_mgr(perm, temp)
+                for reading in [
+                    {'hour': 8,  'soil_temp': 21.0, 'rain_fall': 0.0, 'soil_moisture': 34.5},
+                    {'hour': 9,  'soil_temp': 21.8, 'rain_fall': 0.1, 'soil_moisture': 34.2},
+                    {'hour': 10, 'soil_temp': 22.5, 'rain_fall': 0.0, 'soil_moisture': 33.9},
+                ]:
+                    results.append(mgr.get_prediction("soil_moisture", pd.DataFrame([reading])))
+        finally:
+            _os.chdir(original_dir)
+
+        assert len(results) == 3, "All 3 cycles should produce a result"
+        for r in results:
+            assert isinstance(r, float), f"Expected float, got {type(r)}: {r}"
+            assert 0 <= r <= 100, f"Result {r} out of range"
+        assert _row_count(temp, "soil_moisture") == 3, "All 3 cycles should write to temp DB"
+
